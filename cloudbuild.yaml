@@ -1,0 +1,98 @@
+steps:
+  # 1. 获取 Go 版本
+  - name: 'golang:1.24-alpine'
+    entrypoint: 'go'
+    args: ['version']
+
+  # 2. 登陆并配置 Docker (Artifact Registry)
+  # Cloud Build 自动配置了 docker credential helper，通常不需要手动运行 gcloud auth configure-docker
+  # 如果确实需要，应该使用 gcr.io/google.com/cloudsdktool/cloud-sdk 镜像
+  # 但对于标准 Cloud Build 环境，直接构建即可，因为它已经有权限推送到同一项目下的 Artifact Registry
+
+  # 3. 构建 Docker 镜像
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--no-cache'
+      - '-t'
+      - 'europe-west1-docker.pkg.dev/${PROJECT_ID}/cli-proxy-repo/cli-proxy-api:latest'
+      - '-t'
+      - 'europe-west1-docker.pkg.dev/${PROJECT_ID}/cli-proxy-repo/cli-proxy-api:${_SHORT_SHA}'
+      - '--build-arg'
+      - 'VERSION=v1.0.0-cloudbuild'
+      - '--build-arg'
+      - 'COMMIT=${_SHORT_SHA}'
+      - '--build-arg'
+      - 'BUILD_DATE=${_DATE}'
+      - '.'
+
+  # 4. 推送镜像到 Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/${PROJECT_ID}/cli-proxy-repo/cli-proxy-api:latest'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/${PROJECT_ID}/cli-proxy-repo/cli-proxy-api:${_SHORT_SHA}'
+
+  # 5. 部署到 Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'cli-proxy-api'
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/${PROJECT_ID}/cli-proxy-repo/cli-proxy-api:latest'
+      - '--region'
+      - 'europe-west1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--port'
+      - '8317' # 容器内部监听端口，Cloud Run 会自动映射 $PORT 到这个端口
+      - '--set-env-vars'
+      - 'DEPLOY=cloud' # 设置部署模式为 cloud，让应用知道它在云端运行
+      - '--set-env-vars'
+      - 'MANAGEMENT_PASSWORD=${_MANAGEMENT_PASSWORD}' # 从 Cloud Build Substitution 获取
+      - '--set-env-vars'
+      - 'PGSTORE_DSN=${_PGSTORE_DSN}'
+      - '--set-env-vars'
+      - 'PGSTORE_SCHEMA=${_PGSTORE_SCHEMA}'
+      - '--set-env-vars'
+      - 'GITSTORE_GIT_URL=${_GITSTORE_GIT_URL}'
+      - '--set-env-vars'
+      - 'GITSTORE_GIT_USERNAME=${_GITSTORE_GIT_USERNAME}'
+      - '--set-env-vars'
+      - 'GITSTORE_GIT_TOKEN=${_GITSTORE_GIT_TOKEN}'
+      - '--set-env-vars'
+      - 'OBJECTSTORE_ENDPOINT=${_OBJECTSTORE_ENDPOINT}'
+      - '--set-env-vars'
+      - 'OBJECTSTORE_BUCKET=${_OBJECTSTORE_BUCKET}'
+      - '--set-env-vars'
+      - 'OBJECTSTORE_ACCESS_KEY=${_OBJECTSTORE_ACCESS_KEY}'
+      - '--set-env-vars'
+      - 'OBJECTSTORE_SECRET_KEY=${_OBJECTSTORE_SECRET_KEY}'
+
+substitutions:
+  _DATE: "unknown"
+  _SHORT_SHA: "latest"
+  _MANAGEMENT_PASSWORD: ""
+  _PGSTORE_DSN: ""
+  _PGSTORE_SCHEMA: ""
+  _GITSTORE_GIT_URL: ""
+  _GITSTORE_GIT_USERNAME: ""
+  _GITSTORE_GIT_TOKEN: ""
+  _OBJECTSTORE_ENDPOINT: ""
+  _OBJECTSTORE_BUCKET: ""
+  _OBJECTSTORE_ACCESS_KEY: ""
+  _OBJECTSTORE_SECRET_KEY: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+images:
+  - 'europe-west1-docker.pkg.dev/${PROJECT_ID}/cli-proxy-repo/cli-proxy-api:latest'
+  - 'europe-west1-docker.pkg.dev/${PROJECT_ID}/cli-proxy-repo/cli-proxy-api:${_SHORT_SHA}'

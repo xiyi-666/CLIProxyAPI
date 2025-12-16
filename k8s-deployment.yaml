@@ -1,0 +1,386 @@
+# Kubernetes Namespace
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cli-proxy-api
+
+---
+# ConfigMap for config.yaml from Cloud Storage
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cli-proxy-config
+  namespace: cli-proxy-api
+data:
+  config.yaml: |
+    # This will be replaced by the actual config.yaml content
+    # You can either:
+    # 1. Use 'kubectl create configmap' with --from-file flag
+    # 2. Mount it directly from a Cloud Storage bucket via init container
+    # See deployment instructions in gcloud-setup.md
+
+---
+# Secret for sensitive API keys (if not using Google Secret Manager)
+# Alternatively, use Google Secret Manager integration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cli-proxy-secrets
+  namespace: cli-proxy-api
+type: Opaque
+stringData:
+  # These should be created via Google Secret Manager in production
+  management-secret-key: "your-management-key-here"
+
+---
+# PersistentVolumeClaim for authentication directory
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cli-proxy-auth-pvc
+  namespace: cli-proxy-api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# PersistentVolumeClaim for logs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cli-proxy-logs-pvc
+  namespace: cli-proxy-api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cli-proxy-api
+  namespace: cli-proxy-api
+  labels:
+    app: cli-proxy-api
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: cli-proxy-api
+  template:
+    metadata:
+      labels:
+        app: cli-proxy-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8317"
+    spec:
+      serviceAccountName: cli-proxy-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+      initContainers:
+      # Download config.yaml from Cloud Storage bucket
+      - name: download-config
+        image: google/cloud-sdk:slim
+        command:
+          - /bin/bash
+          - -c
+          - |
+            gsutil cp gs://${GCP_BUCKET_NAME}/config.yaml /config/config.yaml
+            chmod 644 /config/config.yaml
+        env:
+        - name: GCP_BUCKET_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: gcp-config
+              key: bucket-name
+        volumeMounts:
+        - name: config-volume
+          mountPath: /config
+
+      containers:
+      - name: cli-proxy-api
+        image: gcr.io/PROJECT_ID/cli-proxy-api:latest
+        imagePullPolicy: Always
+        
+        ports:
+        - name: api
+          containerPort: 8317
+          protocol: TCP
+        - name: alt1
+          containerPort: 8085
+          protocol: TCP
+        - name: alt2
+          containerPort: 1455
+          protocol: TCP
+        - name: alt3
+          containerPort: 54545
+          protocol: TCP
+        - name: alt4
+          containerPort: 51121
+          protocol: TCP
+        - name: alt5
+          containerPort: 11451
+          protocol: TCP
+
+        env:
+        # From ConfigMap
+        - name: DEPLOY
+          value: "gcloud"
+        
+        # From Secrets (Google Secret Manager integration)
+        - name: MANAGEMENT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cli-proxy-secrets
+              key: management-secret-key
+
+        # Resource limits
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8317
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8317
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+
+        # Volume mounts
+        volumeMounts:
+        - name: config-volume
+          mountPath: /CLIProxyAPI
+          readOnly: true
+        - name: auth-volume
+          mountPath: /root/.cli-proxy-api
+        - name: logs-volume
+          mountPath: /CLIProxyAPI/logs
+        - name: tmp-volume
+          mountPath: /tmp
+
+        # Security context
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+
+      # Volumes
+      volumes:
+      - name: config-volume
+        emptyDir: {}
+      - name: auth-volume
+        persistentVolumeClaim:
+          claimName: cli-proxy-auth-pvc
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: cli-proxy-logs-pvc
+      - name: tmp-volume
+        emptyDir: {}
+
+      # Pod disruption budget for high availability
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - cli-proxy-api
+              topologyKey: kubernetes.io/hostname
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: cli-proxy-api
+  namespace: cli-proxy-api
+  labels:
+    app: cli-proxy-api
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+spec:
+  type: LoadBalancer
+  ports:
+  - name: api
+    port: 8317
+    targetPort: 8317
+    protocol: TCP
+  - name: alt1
+    port: 8085
+    targetPort: 8085
+    protocol: TCP
+  - name: alt2
+    port: 1455
+    targetPort: 1455
+    protocol: TCP
+  - name: alt3
+    port: 54545
+    targetPort: 54545
+    protocol: TCP
+  - name: alt4
+    port: 51121
+    targetPort: 51121
+    protocol: TCP
+  - name: alt5
+    port: 11451
+    targetPort: 11451
+    protocol: TCP
+  selector:
+    app: cli-proxy-api
+
+---
+# ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cli-proxy-api
+  namespace: cli-proxy-api
+
+---
+# Role for accessing ConfigMap and Secrets
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cli-proxy-api
+  namespace: cli-proxy-api
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cli-proxy-api
+  namespace: cli-proxy-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cli-proxy-api
+subjects:
+- kind: ServiceAccount
+  name: cli-proxy-api
+  namespace: cli-proxy-api
+
+---
+# HorizontalPodAutoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cli-proxy-api-hpa
+  namespace: cli-proxy-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cli-proxy-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cli-proxy-api-pdb
+  namespace: cli-proxy-api
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: cli-proxy-api
+
+---
+# Ingress (optional - for Cloud Load Balancer)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cli-proxy-api-ingress
+  namespace: cli-proxy-api
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "cli-proxy-api-ip"
+    networking.gke.io/managed-certificates: "cli-proxy-api-cert"
+    kubernetes.io/ingress.allow-http: "false"
+spec:
+  rules:
+  - host: cli-proxy-api.example.com
+    http:
+      paths:
+      - path: /*
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: cli-proxy-api
+            port:
+              number: 8317
+
+---
+# ManagedCertificate for HTTPS
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: cli-proxy-api-cert
+  namespace: cli-proxy-api
+spec:
+  domains:
+  - cli-proxy-api.example.com

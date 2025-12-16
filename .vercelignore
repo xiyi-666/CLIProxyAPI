@@ -1,0 +1,16 @@
+.git
+.env
+.github
+deploy.sh
+deploy.ps1
+deploy_cloudrun.bat
+deploy_cloudrun.sh
+docker-build.ps1
+docker-build.sh
+docker-compose.yml
+Dockerfile
+cloudbuild.yaml
+config.example.yaml
+tests/
+examples/
+docs/

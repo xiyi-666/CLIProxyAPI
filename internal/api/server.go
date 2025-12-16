@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -299,8 +300,21 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Create HTTP server
+	// Cloud Run provides the listening port via the PORT environment variable.
+	// If PORT is set, use it; otherwise fall back to the configured port.
+	var listenPort int
+	if envPortStr := strings.TrimSpace(os.Getenv("PORT")); envPortStr != "" {
+		if p, err := strconv.Atoi(envPortStr); err == nil && p > 0 {
+			listenPort = p
+		} else {
+			// Fallback to configured port on parse error
+			listenPort = cfg.Port
+		}
+	} else {
+		listenPort = cfg.Port
+	}
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Addr:    fmt.Sprintf("%s:%d", cfg.Host, listenPort),
 		Handler: engine,
 	}
 
@@ -717,6 +731,12 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+// ServeHTTP implements the http.Handler interface.
+// This allows the server to be used as a standard HTTP handler.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.engine.ServeHTTP(w, r)
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.

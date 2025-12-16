@@ -399,6 +399,70 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+// ServeHTTP implements the http.Handler interface.
+func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.server != nil {
+		s.server.ServeHTTP(w, r)
+	} else {
+		http.Error(w, "Service not initialized", http.StatusInternalServerError)
+	}
+}
+
+// Bootstrap initializes the service components without starting the blocking server loop.
+// This is suitable for serverless environments (like Vercel) where the request cycle is managed externally.
+func (s *Service) Bootstrap(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("cliproxy: service is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	usage.StartDefault(ctx)
+
+	if err := s.ensureAuthDir(); err != nil {
+		// Log warning but proceed; auth might be read-only or in-memory in serverless
+		log.Warnf("failed to ensure auth dir: %v", err)
+	}
+
+	s.applyRetryConfig(s.cfg)
+
+	if s.coreManager != nil {
+		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
+			log.Warnf("failed to load auth store: %v", errLoad)
+		}
+	}
+
+	_, err := s.tokenProvider.Load(ctx, s.cfg)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+
+	_, err = s.apiKeyProvider.Load(ctx, s.cfg)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+
+	if s.authManager == nil {
+		s.authManager = newDefaultAuthManager()
+	}
+
+	// Note: Websocket gateway and file watchers are typically not started in serverless bootstrap
+	// as they require persistent background processes.
+
+	if s.hooks.OnBeforeStart != nil {
+		s.hooks.OnBeforeStart(s.cfg)
+	}
+
+	if s.hooks.OnAfterStart != nil {
+		s.hooks.OnAfterStart(s)
+	}
+
+	return nil
+}
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
